@@ -13,10 +13,8 @@ import json
 # Default / fallback model choices (checked in order)
 # ---------------------------------------------------------------------------
 PREFERRED_MODELS = [
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-pro",
+    "gemini-3.5-flash-lite",
+    "gemini-4-hydrogen",
 ]
 
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
