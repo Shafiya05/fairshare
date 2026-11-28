@@ -34,6 +34,10 @@ SUMMARY_TTL = 3600              # seconds to cache successful AI summaries
 SUMMARY_ERR_TTL = 60            # seconds to cache failed AI summaries
 ACTIVITY_TYPES = ["commit", "pull_request", "issue", "comment"]
 ACTIVITY_COLORS = ["#2563EB", "#16A34A", "#D97706", "#9333EA"]
+AVATAR_COLORS = [
+    "#4F46E5", "#0D9488", "#2563EB", "#D97706",
+    "#9333EA", "#DB2777", "#059669", "#DC2626",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +343,41 @@ def inject_css():
             opacity: 0.7;
             margin-top: 0.25rem;
         }
+        /* Unified person chip (avatar + username) */
+        .fs-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.55rem;
+            min-width: 0;
+            vertical-align: middle;
+        }
+        .fs-chip-avatar {
+            position: relative;
+            border-radius: 50%;
+            overflow: hidden;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            color: #ffffff;
+            flex-shrink: 0;
+            border: 1px solid rgba(128, 128, 128, 0.25);
+        }
+        .fs-chip-avatar img {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 50%;
+            color: transparent;
+        }
+        .fs-chip-name {
+            font-weight: 600;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
         /* Leaderboard cards */
         .fs-leader-card {
             display: flex;
@@ -356,28 +395,6 @@ def inject_css():
             min-width: 1.9rem;
             opacity: 0.75;
         }
-        .fs-avatar {
-            position: relative;
-            width: 38px;
-            height: 38px;
-            min-width: 38px;
-            border-radius: 50%;
-            background: rgba(79, 70, 229, 0.22);
-            border: 1px solid rgba(128, 128, 128, 0.25);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: 700;
-            font-size: 0.82rem;
-            overflow: hidden;
-        }
-        .fs-avatar-img {
-            position: absolute;
-            inset: 0;
-            background-size: cover;
-            background-position: center;
-            border-radius: 50%;
-        }
         .fs-leader-body {
             flex: 1;
             min-width: 0;
@@ -385,16 +402,9 @@ def inject_css():
         .fs-leader-head {
             display: flex;
             justify-content: space-between;
-            align-items: baseline;
+            align-items: center;
             gap: 0.5rem;
             margin-bottom: 0.35rem;
-        }
-        .fs-leader-name {
-            font-weight: 600;
-            font-size: 0.95rem;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
         }
         .fs-leader-count {
             font-size: 0.82rem;
@@ -586,12 +596,19 @@ def inject_css():
     )
 
 
-def _metric_card_html(icon: str, label: str, value: str, sub: str = "") -> str:
+def _metric_card_html(
+    icon: str,
+    label: str,
+    value: str = "",
+    sub: str = "",
+    value_html: str | None = None,
+) -> str:
     sub_html = f'<div class="fs-metric-sub">{html.escape(sub)}</div>' if sub else ""
+    body_html = value_html if value_html is not None else html.escape(value)
     return (
         f'<div class="fs-metric-card">'
         f'<div class="fs-metric-top"><span>{icon}</span><span>{html.escape(label)}</span></div>'
-        f'<div class="fs-metric-value">{html.escape(value)}</div>'
+        f'<div class="fs-metric-value">{body_html}</div>'
         f'{sub_html}'
         f'</div>'
     )
@@ -604,12 +621,46 @@ def _initials(name: str) -> str:
     return name[:2].upper() if name else "?"
 
 
+def _avatar_bg(name: str) -> str:
+    idx = sum((i + 1) * ord(ch) for i, ch in enumerate(name)) % len(AVATAR_COLORS)
+    return AVATAR_COLORS[idx]
+
+
 def _github_login_for(person: str, df: pd.DataFrame) -> str:
     if "original_person" in df.columns:
         matches = df.loc[df["person"] == person, "original_person"]
         if not matches.empty:
             return str(matches.iloc[0])
     return person
+
+
+def person_chip(
+    name: str,
+    size: int = 28,
+    login: str | None = None,
+    sample: bool = False,
+) -> str:
+    """Return HTML for a rounded avatar + username chip with pure-CSS initials fallback."""
+    safe_name = html.escape(str(name))
+    initials = html.escape(_initials(str(name)))
+    bg = _avatar_bg(str(name))
+    font_px = max(10, int(size * 0.38))
+    img_html = ""
+    if not sample:
+        gh_login = html.escape(str(login if login is not None else name))
+        img_html = (
+            f'<img src="https://github.com/{gh_login}.png?size=80" '
+            f'alt="" loading="lazy">'
+        )
+    return (
+        f'<span class="fs-chip">'
+        f'<span class="fs-chip-avatar" style="width:{size}px;height:{size}px;'
+        f'font-size:{font_px}px;background-color:{bg};">'
+        f'<span>{initials}</span>{img_html}'
+        f'</span>'
+        f'<span class="fs-chip-name">{safe_name}</span>'
+        f'</span>'
+    )
 
 
 def _build_contribution_bar_chart(summary_df: pd.DataFrame) -> alt.Chart:
@@ -984,13 +1035,30 @@ if st.session_state.analysis_done and st.session_state.df is not None:
         else "—"
     )
 
+    is_sample = bool(st.session_state.get("is_sample", False))
+    top_chip_html = (
+        person_chip(
+            top_person,
+            size=26,
+            login=_github_login_for(top_person, df),
+            sample=is_sample,
+        )
+        if not summary.empty
+        else "—"
+    )
+
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.markdown(_metric_card_html("📁", "Repository", repo_id), unsafe_allow_html=True)
     m2.markdown(_metric_card_html("📊", "Total Activities", f"{len(df):,}"), unsafe_allow_html=True)
     m3.markdown(_metric_card_html("👥", "Contributors", str(df["person"].nunique())), unsafe_allow_html=True)
     m4.markdown(_metric_card_html("📅", "Date Range", date_range), unsafe_allow_html=True)
     m5.markdown(
-        _metric_card_html("🏆", "Top Contributor", top_person, f"{top_total:,} activities"),
+        _metric_card_html(
+            "🏆",
+            "Top Contributor",
+            sub=f"{top_total:,} activities",
+            value_html=top_chip_html,
+        ),
         unsafe_allow_html=True,
     )
 
@@ -1019,16 +1087,13 @@ if st.session_state.analysis_done and st.session_state.df is not None:
             person_total = int(summary.loc[person, "total"])
             pct = min(100.0, (person_total / total_all) * 100.0)
             login = _github_login_for(person, df)
-            avatar_url = f"https://github.com/{html.escape(login)}.png"
-            initials = html.escape(_initials(person))
+            chip_html = person_chip(str(person), size=34, login=login, sample=is_sample)
             card_html = (
                 f'<div class="fs-leader-card">'
                 f'<div class="fs-rank">#{idx + 1}</div>'
-                f'<div class="fs-avatar"><span>{initials}</span>'
-                f'<div class="fs-avatar-img" style="background-image: url(\'{avatar_url}\');"></div></div>'
                 f'<div class="fs-leader-body">'
                 f'<div class="fs-leader-head">'
-                f'<span class="fs-leader-name">{html.escape(str(person))}</span>'
+                f'{chip_html}'
                 f'<span class="fs-leader-count">{person_total:,} ({pct:.1f}%)</span>'
                 f'</div>'
                 f'<div class="fs-progress-track">'
@@ -1048,7 +1113,20 @@ if st.session_state.analysis_done and st.session_state.df is not None:
             if not summary.empty:
                 st.altair_chart(_build_contribution_bar_chart(summary), use_container_width=True)
         with col_table:
-            st.dataframe(summary, use_container_width=True)
+            summary_display = summary.reset_index()
+            avatar_urls = [
+                None if is_sample else f"https://github.com/{_github_login_for(p, df)}.png?size=80"
+                for p in summary_display["person"]
+            ]
+            summary_display.insert(0, "Avatar", avatar_urls)
+            st.dataframe(
+                summary_display,
+                column_config={
+                    "Avatar": st.column_config.ImageColumn("Avatar", width="small"),
+                },
+                hide_index=True,
+                use_container_width=True,
+            )
 
     # -----------------------------------------------------------------------
     # Tab 2: Timeline (Altair weekly chart + table side-by-side)
@@ -1089,10 +1167,19 @@ if st.session_state.analysis_done and st.session_state.df is not None:
                 )
                 badge_cls = "fs-status-red" if days_ago >= 60 else "fs-status-amber"
                 badge_label = f"{days_ago}d inactive"
+                contrib = str(row["contributor"])
+                chip_html = person_chip(
+                    contrib,
+                    size=26,
+                    login=_github_login_for(contrib, df),
+                    sample=is_sample,
+                )
                 st.markdown(
                     f'<div class="fs-inactive-card">'
-                    f'<div><strong>{html.escape(str(row["contributor"]))}</strong> '
-                    f'<span style="opacity:0.75;font-size:0.85rem;">· last active {html.escape(last_date)}</span></div>'
+                    f'<div style="display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap;">'
+                    f'{chip_html}'
+                    f'<span style="opacity:0.75;font-size:0.85rem;">· last active {html.escape(last_date)}</span>'
+                    f'</div>'
                     f'<span class="fs-status-badge {badge_cls}">{html.escape(badge_label)}</span>'
                     f'</div>',
                     unsafe_allow_html=True,
@@ -1104,15 +1191,25 @@ if st.session_state.analysis_done and st.session_state.df is not None:
             "Shows GitHub usernames merged under a single contributor name using the sidebar rules."
         )
         if st.session_state.identity_map:
-            map_rows = []
             for display, logins in st.session_state.identity_map.items():
                 matched = int(df[df["person"] == display].shape[0])
-                map_rows.append({
-                    "Display Name": display,
-                    "Mapped Usernames": ", ".join(logins),
-                    "Matched Activities": matched,
-                })
-            st.dataframe(pd.DataFrame(map_rows), use_container_width=True, hide_index=True)
+                first_login = logins[0] if logins else display
+                chip_html = person_chip(
+                    str(display),
+                    size=28,
+                    login=first_login,
+                    sample=is_sample,
+                )
+                st.markdown(
+                    f'<div class="fs-inactive-card">'
+                    f'<div style="display:flex;align-items:center;gap:0.65rem;flex-wrap:wrap;">'
+                    f'{chip_html}'
+                    f'<span style="opacity:0.75;font-size:0.85rem;">← {html.escape(", ".join(logins))}</span>'
+                    f'</div>'
+                    f'<span style="opacity:0.8;font-size:0.84rem;font-weight:600;">{matched:,} activities</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
         else:
             st.info(
                 "ℹ️ No identity mappings configured. Use **Identity Mapping** in the sidebar to merge duplicate usernames."
@@ -1184,11 +1281,19 @@ if st.session_state.analysis_done and st.session_state.df is not None:
                         if text.startswith("Error:"):
                             st.warning(f"**{person}** — {text}")
                         else:
+                            chip_html = person_chip(
+                                str(person),
+                                size=28,
+                                login=_github_login_for(person, df),
+                                sample=is_sample,
+                            )
                             card_html = (
                                 f'<div class="fs-ai-card">'
                                 f'<div class="fs-ai-head">'
-                                f'<span class="fs-ai-name">🧑‍💻 {html.escape(str(person))} '
-                                f'<span style="opacity:0.65;font-weight:400;font-size:0.85rem;">({total_c:,} contributions)</span></span>'
+                                f'<span style="display:inline-flex;align-items:center;gap:0.5rem;">'
+                                f'{chip_html}'
+                                f'<span style="opacity:0.65;font-weight:400;font-size:0.85rem;">({total_c:,} contributions)</span>'
+                                f'</span>'
                                 f'<span class="fs-ai-pill">AI</span>'
                                 f'</div>'
                                 f'<div class="fs-ai-body">{html.escape(text)}</div>'
@@ -1290,20 +1395,20 @@ elif not st.session_state.analysis_done:
     )
 
     preview_members = [
-        ("Aarav", "AA", 52),
-        ("Meera", "ME", 27),
-        ("Kabir", "KA", 14),
-        ("Zoya", "ZO", 7),
+        ("Aarav", 52),
+        ("Meera", 27),
+        ("Kabir", 14),
+        ("Zoya", 7),
     ]
     preview_rows_html = []
-    for idx, (name, initials, pct) in enumerate(preview_members):
+    for idx, (name, pct) in enumerate(preview_members):
+        chip_html = person_chip(name, size=32, sample=True)
         preview_rows_html.append(
             f'<div class="fs-leader-card">'
             f'<div class="fs-rank">#{idx + 1}</div>'
-            f'<div class="fs-avatar"><span>{initials}</span></div>'
             f'<div class="fs-leader-body">'
             f'<div class="fs-leader-head">'
-            f'<span class="fs-leader-name">{name}</span>'
+            f'{chip_html}'
             f'<span class="fs-leader-count">{pct} activities ({pct}%)</span>'
             f'</div>'
             f'<div class="fs-progress-track">'
