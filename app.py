@@ -697,7 +697,7 @@ st.markdown(
 col_url, col_btn, col_clear = st.columns([5, 1.5, 1], vertical_alignment="bottom")
 url = col_url.text_input(
     "🔗 GitHub Repository URL",
-    value="https://github.com/Shafiya05/fairshare",
+    value="https://github.com/allenai/OLMo-core",
     placeholder="https://github.com/owner/repo",
 )
 analyse_clicked = col_btn.button("🔍 Analyse", type="primary", use_container_width=True)
