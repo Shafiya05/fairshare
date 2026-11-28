@@ -3,12 +3,14 @@ app.py – FairShare: Team Contribution Intelligence
 Streamlit dashboard for GitHub repository activity analysis.
 """
 
+import html
 import io
 import json
 import time
 import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -259,6 +261,352 @@ def _format_error_hint(message: str) -> str:
     return message
 
 
+def inject_css():
+    """Inject theme-neutral custom CSS that adapts to both light and dark modes."""
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        /* Hero banner */
+        .fs-hero {
+            background: linear-gradient(135deg, #4f46e5 0%, #0d9488 100%);
+            border-radius: 14px;
+            padding: 1.5rem 1.75rem;
+            margin-bottom: 1.25rem;
+            color: #ffffff;
+            box-shadow: 0 6px 20px rgba(79, 70, 229, 0.18);
+        }
+        .fs-hero-title {
+            font-size: 1.85rem;
+            font-weight: 700;
+            margin: 0 0 0.3rem 0;
+            letter-spacing: -0.02em;
+            color: #ffffff;
+        }
+        .fs-hero-sub {
+            font-size: 0.98rem;
+            margin: 0 0 0.85rem 0;
+            color: rgba(255, 255, 255, 0.9);
+        }
+        .fs-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.45rem;
+        }
+        .fs-badge {
+            display: inline-block;
+            padding: 0.2rem 0.65rem;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            background: rgba(255, 255, 255, 0.18);
+            border: 1px solid rgba(255, 255, 255, 0.28);
+            color: #ffffff;
+        }
+        /* Metric cards */
+        .fs-metric-card {
+            background: rgba(128, 128, 128, 0.08);
+            border: 1px solid rgba(128, 128, 128, 0.18);
+            border-radius: 12px;
+            padding: 0.9rem 1rem;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+            height: 100%;
+        }
+        .fs-metric-top {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            font-size: 0.78rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            opacity: 0.72;
+            margin-bottom: 0.35rem;
+        }
+        .fs-metric-value {
+            font-size: 1.35rem;
+            font-weight: 700;
+            line-height: 1.25;
+            word-break: break-word;
+        }
+        .fs-metric-sub {
+            font-size: 0.78rem;
+            opacity: 0.7;
+            margin-top: 0.25rem;
+        }
+        /* Leaderboard cards */
+        .fs-leader-card {
+            display: flex;
+            align-items: center;
+            gap: 0.85rem;
+            background: rgba(128, 128, 128, 0.08);
+            border: 1px solid rgba(128, 128, 128, 0.18);
+            border-radius: 12px;
+            padding: 0.75rem 1rem;
+            margin-bottom: 0.6rem;
+        }
+        .fs-rank {
+            font-size: 0.9rem;
+            font-weight: 700;
+            min-width: 1.9rem;
+            opacity: 0.75;
+        }
+        .fs-avatar {
+            position: relative;
+            width: 38px;
+            height: 38px;
+            min-width: 38px;
+            border-radius: 50%;
+            background: rgba(79, 70, 229, 0.22);
+            border: 1px solid rgba(128, 128, 128, 0.25);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 0.82rem;
+            overflow: hidden;
+        }
+        .fs-avatar-img {
+            position: absolute;
+            inset: 0;
+            background-size: cover;
+            background-position: center;
+            border-radius: 50%;
+        }
+        .fs-leader-body {
+            flex: 1;
+            min-width: 0;
+        }
+        .fs-leader-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 0.5rem;
+            margin-bottom: 0.35rem;
+        }
+        .fs-leader-name {
+            font-weight: 600;
+            font-size: 0.95rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .fs-leader-count {
+            font-size: 0.82rem;
+            opacity: 0.8;
+            white-space: nowrap;
+        }
+        .fs-progress-track {
+            width: 100%;
+            height: 7px;
+            border-radius: 999px;
+            background: rgba(128, 128, 128, 0.18);
+            overflow: hidden;
+        }
+        .fs-progress-fill {
+            height: 100%;
+            border-radius: 999px;
+            background: linear-gradient(90deg, #4f46e5, #0d9488);
+        }
+        /* Inactive member cards & badges */
+        .fs-inactive-card {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 0.75rem;
+            background: rgba(128, 128, 128, 0.08);
+            border: 1px solid rgba(128, 128, 128, 0.18);
+            border-radius: 10px;
+            padding: 0.7rem 1rem;
+            margin-bottom: 0.55rem;
+        }
+        .fs-status-badge {
+            display: inline-block;
+            padding: 0.2rem 0.6rem;
+            border-radius: 999px;
+            font-size: 0.78rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .fs-status-amber {
+            background: rgba(217, 119, 6, 0.16);
+            border: 1px solid rgba(217, 119, 6, 0.45);
+            color: #d97706;
+        }
+        .fs-status-red {
+            background: rgba(220, 38, 38, 0.16);
+            border: 1px solid rgba(220, 38, 38, 0.45);
+            color: #ef4444;
+        }
+        /* AI summary cards */
+        .fs-ai-card {
+            background: rgba(128, 128, 128, 0.08);
+            border: 1px solid rgba(128, 128, 128, 0.18);
+            border-radius: 12px;
+            padding: 0.95rem 1.1rem;
+            margin-bottom: 0.75rem;
+        }
+        .fs-ai-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.5rem;
+            margin-bottom: 0.45rem;
+        }
+        .fs-ai-name {
+            font-weight: 600;
+            font-size: 0.98rem;
+        }
+        .fs-ai-pill {
+            font-size: 0.7rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            padding: 0.15rem 0.5rem;
+            border-radius: 999px;
+            background: rgba(79, 70, 229, 0.18);
+            border: 1px solid rgba(79, 70, 229, 0.4);
+        }
+        .fs-ai-body {
+            font-size: 0.92rem;
+            line-height: 1.5;
+            opacity: 0.92;
+        }
+        /* Empty state step cards */
+        .fs-step-card {
+            background: rgba(128, 128, 128, 0.08);
+            border: 1px solid rgba(128, 128, 128, 0.18);
+            border-radius: 12px;
+            padding: 1rem 1.1rem;
+            height: 100%;
+        }
+        .fs-step-num {
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            opacity: 0.68;
+            margin-bottom: 0.25rem;
+        }
+        .fs-step-title {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 0.3rem;
+        }
+        .fs-step-desc {
+            font-size: 0.86rem;
+            opacity: 0.8;
+            line-height: 1.45;
+        }
+        /* Clearer, larger tab labels */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 0.4rem;
+        }
+        .stTabs [data-baseweb="tab"] {
+            font-size: 0.98rem;
+            font-weight: 600;
+            padding: 0.55rem 1rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _metric_card_html(icon: str, label: str, value: str, sub: str = "") -> str:
+    sub_html = f'<div class="fs-metric-sub">{html.escape(sub)}</div>' if sub else ""
+    return (
+        f'<div class="fs-metric-card">'
+        f'<div class="fs-metric-top"><span>{icon}</span><span>{html.escape(label)}</span></div>'
+        f'<div class="fs-metric-value">{html.escape(value)}</div>'
+        f'{sub_html}'
+        f'</div>'
+    )
+
+
+def _initials(name: str) -> str:
+    parts = [p for p in name.replace("-", " ").replace("_", " ").split() if p]
+    if len(parts) >= 2:
+        return (parts[0][0] + parts[1][0]).upper()
+    return name[:2].upper() if name else "?"
+
+
+def _github_login_for(person: str, df: pd.DataFrame) -> str:
+    if "original_person" in df.columns:
+        matches = df.loc[df["person"] == person, "original_person"]
+        if not matches.empty:
+            return str(matches.iloc[0])
+    return person
+
+
+def _build_contribution_bar_chart(summary_df: pd.DataFrame) -> alt.Chart:
+    chart_src = summary_df.drop(columns="total", errors="ignore").reindex(
+        columns=ACTIVITY_TYPES, fill_value=0
+    )
+    long_df = (
+        chart_src.reset_index()
+        .melt(id_vars="person", var_name="type", value_name="count")
+    )
+    return (
+        alt.Chart(long_df)
+        .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+        .encode(
+            x=alt.X(
+                "person:N",
+                sort=list(summary_df.index),
+                title="Contributor",
+                axis=alt.Axis(labelAngle=-25),
+            ),
+            y=alt.Y("count:Q", title="Activities"),
+            color=alt.Color(
+                "type:N",
+                scale=alt.Scale(domain=ACTIVITY_TYPES, range=ACTIVITY_COLORS),
+                legend=alt.Legend(title="Activity Type", orient="top"),
+            ),
+            order=alt.Order("type:N", sort="ascending"),
+            tooltip=[
+                alt.Tooltip("person:N", title="Contributor"),
+                alt.Tooltip("type:N", title="Type"),
+                alt.Tooltip("count:Q", title="Activities"),
+            ],
+        )
+        .properties(height=340, background="transparent")
+        .configure_axis(gridOpacity=0.18)
+        .configure_view(stroke=None)
+    )
+
+
+def _build_weekly_line_chart(weekly_df: pd.DataFrame) -> alt.Chart:
+    src = weekly_df.reindex(columns=ACTIVITY_TYPES, fill_value=0).reset_index()
+    date_col = src.columns[0]
+    long_df = src.melt(id_vars=date_col, var_name="type", value_name="count")
+    return (
+        alt.Chart(long_df)
+        .mark_line(point=True, strokeWidth=2.5)
+        .encode(
+            x=alt.X(f"{date_col}:T", title="Week"),
+            y=alt.Y("count:Q", title="Activities"),
+            color=alt.Color(
+                "type:N",
+                scale=alt.Scale(domain=ACTIVITY_TYPES, range=ACTIVITY_COLORS),
+                legend=alt.Legend(title="Activity Type", orient="top"),
+            ),
+            tooltip=[
+                alt.Tooltip(f"{date_col}:T", title="Week"),
+                alt.Tooltip("type:N", title="Type"),
+                alt.Tooltip("count:Q", title="Activities"),
+            ],
+        )
+        .properties(height=340, background="transparent")
+        .configure_axis(gridOpacity=0.18)
+        .configure_view(stroke=None)
+    )
+
+
+inject_css()
+
+
 # ===========================================================================
 # SIDEBAR
 # ===========================================================================
@@ -328,8 +676,20 @@ with st.sidebar:
 # ===========================================================================
 # MAIN AREA
 # ===========================================================================
-st.title("📊 FairShare")
-st.caption("Team contribution intelligence powered by real GitHub activity.")
+st.markdown(
+    """
+    <div class="fs-hero">
+        <div class="fs-hero-title">📊 FairShare</div>
+        <div class="fs-hero-sub">Team contribution intelligence powered by real GitHub repository activity.</div>
+        <div class="fs-badges">
+            <span class="fs-badge">GitHub API</span>
+            <span class="fs-badge">Gemini AI</span>
+            <span class="fs-badge">Live</span>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ---------------------------------------------------------------------------
 # Repository input row
@@ -341,7 +701,7 @@ url = col_url.text_input(
     placeholder="https://github.com/owner/repo",
 )
 analyse_clicked = col_btn.button("🔍 Analyse", type="primary", use_container_width=True)
-if col_clear.button("🗑️ Clear", use_container_width=True):
+if col_clear.button("🗑️ Clear", type="secondary", use_container_width=True):
     st.session_state.df = None
     st.session_state.analysis_done = False
     st.session_state.ai_summaries = {}
@@ -476,11 +836,14 @@ if st.session_state.analysis_done and st.session_state.df is not None:
     )
 
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("📁 Repository", repo_id)
-    m2.metric("📊 Total Activities", f"{len(df):,}")
-    m3.metric("👥 Contributors", df["person"].nunique())
-    m4.metric("📅 Date Range", date_range)
-    m5.metric("🏆 Top Contributor", top_person, delta=f"{top_total} activities", delta_color="off")
+    m1.markdown(_metric_card_html("📁", "Repository", repo_id), unsafe_allow_html=True)
+    m2.markdown(_metric_card_html("📊", "Total Activities", f"{len(df):,}"), unsafe_allow_html=True)
+    m3.markdown(_metric_card_html("👥", "Contributors", str(df["person"].nunique())), unsafe_allow_html=True)
+    m4.markdown(_metric_card_html("📅", "Date Range", date_range), unsafe_allow_html=True)
+    m5.markdown(
+        _metric_card_html("🏆", "Top Contributor", top_person, f"{top_total:,} activities"),
+        unsafe_allow_html=True,
+    )
 
     st.divider()
 
@@ -494,23 +857,52 @@ if st.session_state.analysis_done and st.session_state.df is not None:
     ])
 
     # -----------------------------------------------------------------------
-    # Tab 1: Overview (bar chart + raw numbers side-by-side)
+    # Tab 1: Overview (leaderboard + Altair bar chart + raw numbers)
     # -----------------------------------------------------------------------
     with tab_overview:
+        st.subheader("🏅 Top Contributor Leaderboard")
+        st.caption(
+            f"Ranks the top {TOP_N} contributors by their share of all {len(df):,} recorded activities."
+        )
+        total_all = max(1, len(df))
+        lb_cols = st.columns(2)
+        for idx, person in enumerate(summary.index):
+            person_total = int(summary.loc[person, "total"])
+            pct = min(100.0, (person_total / total_all) * 100.0)
+            login = _github_login_for(person, df)
+            avatar_url = f"https://github.com/{html.escape(login)}.png"
+            initials = html.escape(_initials(person))
+            card_html = (
+                f'<div class="fs-leader-card">'
+                f'<div class="fs-rank">#{idx + 1}</div>'
+                f'<div class="fs-avatar"><span>{initials}</span>'
+                f'<div class="fs-avatar-img" style="background-image: url(\'{avatar_url}\');"></div></div>'
+                f'<div class="fs-leader-body">'
+                f'<div class="fs-leader-head">'
+                f'<span class="fs-leader-name">{html.escape(str(person))}</span>'
+                f'<span class="fs-leader-count">{person_total:,} ({pct:.1f}%)</span>'
+                f'</div>'
+                f'<div class="fs-progress-track">'
+                f'<div class="fs-progress-fill" style="width: {pct:.1f}%;"></div>'
+                f'</div></div></div>'
+            )
+            lb_cols[idx % 2].markdown(card_html, unsafe_allow_html=True)
+
+        st.divider()
         st.subheader("📊 Contribution Split & Statistics")
         st.caption(
             f"Shows the top {TOP_N} contributors broken down by commits, pull requests, "
             "issues, and comments."
         )
-        chart_data = summary.drop(columns="total").reindex(columns=ACTIVITY_TYPES, fill_value=0)
         col_chart, col_table = st.columns([3, 2])
         with col_chart:
-            st.bar_chart(chart_data, color=ACTIVITY_COLORS, use_container_width=True)
+            if not summary.empty:
+                st.altair_chart(_build_contribution_bar_chart(summary), use_container_width=True)
         with col_table:
             st.dataframe(summary, use_container_width=True)
 
     # -----------------------------------------------------------------------
-    # Tab 2: Timeline (weekly chart + table side-by-side)
+    # Tab 2: Timeline (Altair weekly chart + table side-by-side)
     # -----------------------------------------------------------------------
     with tab_timeline:
         st.subheader("📅 Weekly Activity Timeline")
@@ -519,7 +911,8 @@ if st.session_state.analysis_done and st.session_state.df is not None:
         )
         col_wchart, col_wtable = st.columns([3, 2])
         with col_wchart:
-            st.line_chart(weekly, color=ACTIVITY_COLORS, use_container_width=True)
+            if not weekly.empty:
+                st.altair_chart(_build_weekly_line_chart(weekly), use_container_width=True)
         with col_wtable:
             st.dataframe(weekly, use_container_width=True)
 
@@ -529,18 +922,31 @@ if st.session_state.analysis_done and st.session_state.df is not None:
     with tab_members:
         st.subheader(f"🚨 Inactive Members ({INACTIVE_DAYS}-day threshold)")
         st.caption(
-            f"Highlights top contributors who have no recorded activity in the past {INACTIVE_DAYS} days."
+            f"Checks contributors with no activity in the last {INACTIVE_DAYS} days (up to the top {TOP_N})."
         )
 
         inactive_only = inactive_df[inactive_df["status"] == "INACTIVE"]
         if inactive_only.empty:
-            st.success("✅ Everyone in the top 10 has been active recently.")
+            n_checked = len(summary)
+            noun = "contributor has" if n_checked == 1 else "contributors have"
+            st.success(f"✅ All {n_checked} {noun} been active in the last {INACTIVE_DAYS} days.")
         else:
             for _, row in inactive_only.iterrows():
-                st.warning(
-                    f"⚠️ **{row['contributor']}** – last activity "
-                    f"{row['days_since_last_activity']} days ago "
-                    f"({row['last_activity_date'].date() if pd.notna(row['last_activity_date']) else 'unknown'})"
+                days_ago = int(row["days_since_last_activity"])
+                last_date = (
+                    str(row["last_activity_date"].date())
+                    if pd.notna(row["last_activity_date"])
+                    else "unknown"
+                )
+                badge_cls = "fs-status-red" if days_ago >= 60 else "fs-status-amber"
+                badge_label = f"{days_ago}d inactive"
+                st.markdown(
+                    f'<div class="fs-inactive-card">'
+                    f'<div><strong>{html.escape(str(row["contributor"]))}</strong> '
+                    f'<span style="opacity:0.75;font-size:0.85rem;">· last active {html.escape(last_date)}</span></div>'
+                    f'<span class="fs-status-badge {badge_cls}">{html.escape(badge_label)}</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
                 )
 
         st.divider()
@@ -597,7 +1003,7 @@ if st.session_state.analysis_done and st.session_state.df is not None:
 
                 top5 = summary.head(TOP_SUMMARY)
 
-                # Generate all summaries in parallel before rendering expanders
+                # Generate all summaries in parallel before rendering cards
                 needs_generation = [p for p in top5.index if not _summary_cache_ok(p)]
                 if needs_generation:
                     with st.spinner(f"Generating {len(needs_generation)} AI summary/summaries…"):
@@ -625,13 +1031,21 @@ if st.session_state.analysis_done and st.session_state.df is not None:
                         )
                         if is_model_404(text):
                             text = "Error: Gemini model not found – check GEMINI_MODEL in secrets.toml."
-                        label = f"🧑‍💻 {person} — {summary.loc[person, 'total']} total contributions"
-                        with st.expander(label):
-                            if text.startswith("Error:"):
-                                st.warning(text)
-                            else:
-                                st.write(text)
-                                st.caption("_(cached)_")
+                        total_c = int(summary.loc[person, "total"])
+                        if text.startswith("Error:"):
+                            st.warning(f"**{person}** — {text}")
+                        else:
+                            card_html = (
+                                f'<div class="fs-ai-card">'
+                                f'<div class="fs-ai-head">'
+                                f'<span class="fs-ai-name">🧑‍💻 {html.escape(str(person))} '
+                                f'<span style="opacity:0.65;font-weight:400;font-size:0.85rem;">({total_c:,} contributions)</span></span>'
+                                f'<span class="fs-ai-pill">AI</span>'
+                                f'</div>'
+                                f'<div class="fs-ai-body">{html.escape(text)}</div>'
+                                f'</div>'
+                            )
+                            st.markdown(card_html, unsafe_allow_html=True)
 
     # -----------------------------------------------------------------------
     # Tab 5: Reports (CSV downloads)
@@ -711,16 +1125,30 @@ if st.session_state.analysis_done and st.session_state.df is not None:
 
 elif not st.session_state.analysis_done:
     st.info(
-        "👋 Paste a public or accessible GitHub repository URL above and click **Analyse** to inspect contributor activity, timelines, inactivity alerts, and AI summaries."
+        "👋 Ready to analyse a repository. Paste a GitHub URL above and click **Analyse** to begin."
     )
-    with st.expander("ℹ️ About FairShare"):
-        st.markdown("""
-**FairShare** analyses real GitHub repository activity to give a clear, fair picture of each team member's contributions.
-
-**What you get:**
-- 📊 **Overview**: Contributor bar chart and raw counts across commits, PRs, issues, and comments
-- 📅 **Timeline**: Weekly activity trends and data table
-- 👥 **Members**: 30-day inactivity alerts and username identity mapping
-- 🤖 **AI Summaries**: Two-sentence contributor summaries powered by Gemini
-- 📥 **Reports**: Individual and combined CSV downloads
-        """)
+    s1, s2, s3 = st.columns(3)
+    s1.markdown(
+        '<div class="fs-step-card">'
+        '<div class="fs-step-num">Step 1</div>'
+        '<div class="fs-step-title">🔗 Connect Repository</div>'
+        '<div class="fs-step-desc">Paste any public or token-accessible GitHub repository URL and click Analyse.</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    s2.markdown(
+        '<div class="fs-step-card">'
+        '<div class="fs-step-num">Step 2</div>'
+        '<div class="fs-step-title">📊 Explore Team Activity</div>'
+        '<div class="fs-step-desc">Review contributor rankings, weekly timelines, inactivity alerts, and identity mappings.</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    s3.markdown(
+        '<div class="fs-step-card">'
+        '<div class="fs-step-num">Step 3</div>'
+        '<div class="fs-step-title">🤖 Summarise & Export</div>'
+        '<div class="fs-step-desc">Read AI-generated contributor summaries and download individual or combined CSV reports.</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
