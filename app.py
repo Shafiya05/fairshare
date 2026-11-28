@@ -74,7 +74,7 @@ def _init_state():
         "ai_model": None,
         "analysis_done": False,
         "is_sample": False,
-        "repo_url": "https://github.com/Shafiya05/fairshare",
+        "repo_url": "https://github.com/pallets/click",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1455,9 +1455,9 @@ elif not st.session_state.analysis_done:
         use_container_width=True,
     )
     ex3.button(
-        "Shafiya05/fairshare",
+        "https://github.com/pallets/click",
         on_click=_set_example_url,
-        args=("Shafiya05/fairshare",),
+        args=("https://github.com/pallets/click",),
         use_container_width=True,
     )
 
