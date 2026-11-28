@@ -7,12 +7,13 @@ import io
 import json
 import time
 import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import streamlit as st
 
 from github_data import collect
-from summarizer import summarize, resolve_model
+from summarizer import summarize, resolve_model, is_model_404, PREFERRED_MODELS
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -24,21 +25,30 @@ st.set_page_config(
 )
 
 INACTIVE_DAYS = 30
-REFRESH_INTERVAL = 300          # seconds between live-mode data refreshes
-SUMMARY_TTL = 3600              # seconds to cache AI summaries
 TOP_N = 10                      # top-N contributors for statistics
 TOP_SUMMARY = 5                 # contributors to summarise with AI
+SUMMARY_TTL = 3600              # seconds to cache successful AI summaries
+SUMMARY_ERR_TTL = 60            # seconds to cache failed AI summaries
 
 
 # ---------------------------------------------------------------------------
 # Credential loading
 # ---------------------------------------------------------------------------
 def _get_secret(key: str, default: str = "") -> str:
-    """Read from st.secrets first, fall back to st.session_state override."""
+    """Read from st.secrets first, return default on any error."""
     try:
         return st.secrets.get(key, default)
     except Exception:
         return default
+
+
+# REFRESH_INTERVAL may be overridden by REFRESH_SECONDS in secrets (e.g. 60 for demo)
+def _refresh_interval() -> int:
+    raw = _get_secret("REFRESH_SECONDS", "")
+    try:
+        return max(10, int(raw))
+    except (ValueError, TypeError):
+        return 300
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +61,7 @@ def _init_state():
         "df": None,
         "repo": "",
         "identity_map": {},         # {display_name: [login1, login2, ...]}
-        "ai_summaries": {},         # {person: (summary_text, timestamp)}
+        "ai_summaries": {},         # {person: (summary_text, timestamp, is_error)}
         "ai_model": None,
         "analysis_done": False,
     }
@@ -79,9 +89,9 @@ def parse_repo(link: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# GitHub data loading (cached 5 min)
+# GitHub data loading (cached per REFRESH_INTERVAL)
 # ---------------------------------------------------------------------------
-@st.cache_data(ttl=REFRESH_INTERVAL, show_spinner=False)
+@st.cache_data(ttl=_refresh_interval(), show_spinner=False)
 def load_data(repo: str, token: str) -> pd.DataFrame:
     return collect(repo, token or None)
 
@@ -111,25 +121,28 @@ def apply_identity_map(df: pd.DataFrame, identity_map: dict) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # AI summary cache helpers
 # ---------------------------------------------------------------------------
-def _summary_is_fresh(person: str) -> bool:
+def _summary_cache_ok(person: str) -> bool:
+    """True if the cached summary (success or error) is still fresh."""
     cache = st.session_state.ai_summaries
     if person not in cache:
         return False
-    _, ts = cache[person]
-    return (time.time() - ts) < SUMMARY_TTL
+    text, ts, is_error = cache[person]
+    ttl = SUMMARY_ERR_TTL if is_error else SUMMARY_TTL
+    return (time.time() - ts) < ttl
 
 
 def _get_cached_summary(person: str) -> str:
-    text, _ = st.session_state.ai_summaries[person]
+    text, _, _ = st.session_state.ai_summaries[person]
     return text
 
 
 def _store_summary(person: str, text: str):
-    st.session_state.ai_summaries[person] = (text, time.time())
+    is_error = text.startswith("Error:")
+    st.session_state.ai_summaries[person] = (text, time.time(), is_error)
 
 
 # ---------------------------------------------------------------------------
-# CSV / Excel export helpers
+# CSV export helpers
 # ---------------------------------------------------------------------------
 def df_to_csv(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=True).encode("utf-8")
@@ -140,7 +153,6 @@ def build_summary_df(top_df: pd.DataFrame, raw_df: pd.DataFrame) -> pd.DataFrame
     id_map = st.session_state.identity_map
     rows = []
     for person in top_df.index:
-        # find original logins
         originals = []
         for display, logins in id_map.items():
             if display == person:
@@ -157,10 +169,9 @@ def build_summary_df(top_df: pd.DataFrame, raw_df: pd.DataFrame) -> pd.DataFrame
 def build_inactive_df(df: pd.DataFrame, summary: pd.DataFrame) -> pd.DataFrame:
     now = pd.Timestamp.now(tz="UTC")
     last = df.groupby("person")["date"].max()
-    days_ago = (now - last).dt.days
     inactive_rows = []
     for person in summary.index:
-        d = int(days_ago.get(person, 999))
+        d = int((now - last.get(person, now)).days)
         status = "INACTIVE" if d > INACTIVE_DAYS else "Active"
         inactive_rows.append({
             "contributor": person,
@@ -171,11 +182,74 @@ def build_inactive_df(df: pd.DataFrame, summary: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(inactive_rows)
 
 
+# ---------------------------------------------------------------------------
+# Parallel AI summary generation
+# ---------------------------------------------------------------------------
+def _generate_summaries_parallel(top5, df, summary, gemini_key, ai_model):
+    """
+    Generate summaries for top-5 contributors in parallel.
+
+    st.session_state is NOT thread-safe. We snapshot the cache as a plain
+    dict on the main thread before entering the pool, use only that snapshot
+    inside worker threads, and write results back to session_state on the
+    main thread after each future completes.
+    """
+    # --- snapshot on main thread (safe) ---
+    cache_snapshot: dict = dict(st.session_state.ai_summaries)
+    now = time.time()
+
+    def _is_cached(person: str) -> bool:
+        if person not in cache_snapshot:
+            return False
+        _text, _ts, _is_err = cache_snapshot[person]
+        ttl = SUMMARY_ERR_TTL if _is_err else SUMMARY_TTL
+        return (now - _ts) < ttl
+
+    def _task(person: str) -> tuple[str, str]:
+        # Only plain dicts/values used here — no st.session_state access.
+        if _is_cached(person):
+            cached_text, _, _ = cache_snapshot[person]
+            return person, cached_text
+        person_counts = {
+            k: int(v)
+            for k, v in summary.loc[person].to_dict().items()
+            if k != "total"
+        }
+        person_df = df[df["person"] == person].head(40)
+        titles = (
+            person_df["title"]
+            .dropna()
+            .loc[person_df["title"].str.strip() != ""]
+            .tolist()[:15]
+        ) if "title" in person_df.columns else []
+        result = summarize(
+            person=person,
+            counts=person_counts,
+            titles=titles,
+            api_key=gemini_key,
+            model=ai_model,
+        )
+        return person, result
+
+    with ThreadPoolExecutor(max_workers=TOP_SUMMARY) as pool:
+        futures = {pool.submit(_task, person): person for person in top5.index}
+        for future in as_completed(futures):
+            try:
+                person, text = future.result()
+            except Exception as exc:
+                person = futures[future]
+                text = f"Error: Unexpected error ({exc})."
+            # Write back to session_state on the main thread (safe).
+            _store_summary(person, text)
+
+
 # ===========================================================================
 # SIDEBAR
 # ===========================================================================
 with st.sidebar:
     st.header("⚙️ Settings")
+
+    REFRESH_INTERVAL = _refresh_interval()
 
     # Live mode
     live_mode = st.checkbox(
@@ -183,10 +257,6 @@ with st.sidebar:
         value=st.session_state.live_mode,
     )
     st.session_state.live_mode = live_mode
-    if live_mode:
-        elapsed = time.time() - st.session_state.last_refresh
-        remaining = max(0, REFRESH_INTERVAL - elapsed)
-        st.info(f"Next refresh in {int(remaining)}s")
 
     st.divider()
 
@@ -209,7 +279,6 @@ with st.sidebar:
                 logins = [l.strip() for l in logins_raw.split(",") if l.strip()]
                 id_map[display_name] = logins
                 st.session_state.identity_map = id_map
-                # Invalidate cached data so stats recalculate
                 st.session_state.df = None
                 st.success(f"Saved: {display_name} → {logins}")
             else:
@@ -257,30 +326,15 @@ if col_clear.button("🗑️ Clear", use_container_width=True):
     st.rerun()
 
 # ---------------------------------------------------------------------------
-# Live-mode auto-refresh trigger
-# ---------------------------------------------------------------------------
-if live_mode and st.session_state.analysis_done:
-    elapsed = time.time() - st.session_state.last_refresh
-    if elapsed >= REFRESH_INTERVAL:
-        st.cache_data.clear()
-        st.session_state.df = None
-        st.session_state.last_refresh = time.time()
-        st.rerun()
-    else:
-        # Schedule a rerun after remaining time using st.fragment / query_params trick
-        # We use a countdown display and rely on the user's browser to trigger rerun
-        # via the meta-refresh equivalent: st.empty + time-based logic.
-        # Streamlit 1.67 supports st.rerun(); we schedule via a short sleep in a
-        # non-blocking fragment-like approach using session time tracking.
-        pass
-
-# ---------------------------------------------------------------------------
-# Load / trigger analysis
+# Credentials (read once at top level)
 # ---------------------------------------------------------------------------
 token = _get_secret("GITHUB_TOKEN")
 gemini_key = _get_secret("GEMINI_API_KEY")
 gemini_model_cfg = _get_secret("GEMINI_MODEL", "")
 
+# ---------------------------------------------------------------------------
+# Manual Analyse button
+# ---------------------------------------------------------------------------
 if analyse_clicked:
     try:
         repo_id = parse_repo(url)
@@ -302,7 +356,6 @@ if analyse_clicked:
         st.warning("No activity data found for this repository.")
         st.stop()
 
-    # Apply identity mapping
     df = apply_identity_map(raw_df, st.session_state.identity_map)
     df["date"] = pd.to_datetime(df["date"], utc=True)
 
@@ -312,11 +365,61 @@ if analyse_clicked:
     st.session_state.last_refresh = time.time()
 
 # ---------------------------------------------------------------------------
+# Live-mode: countdown fragment + auto-refresh logic
+# ---------------------------------------------------------------------------
+if live_mode and st.session_state.analysis_done:
+    REFRESH_INTERVAL = _refresh_interval()
+
+    elapsed = time.time() - st.session_state.last_refresh
+
+    if elapsed >= REFRESH_INTERVAL:
+        # Time to refresh: re-fetch data, never set df to None
+        repo_id = st.session_state.repo
+        st.cache_data.clear()
+        try:
+            raw_df = load_data(repo_id, token)
+            if raw_df is not None and not raw_df.empty:
+                df_new = apply_identity_map(raw_df, st.session_state.identity_map)
+                df_new["date"] = pd.to_datetime(df_new["date"], utc=True)
+                st.session_state.df = df_new
+        except Exception as exc:
+            # Keep old data visible; show a warning (rendered below in dashboard)
+            st.session_state["_refresh_error"] = str(exc)
+        else:
+            st.session_state.pop("_refresh_error", None)
+        st.session_state.last_refresh = time.time()
+        st.rerun()
+
+    else:
+        # Show a countdown that updates every 10 seconds (not every second)
+        remaining = max(0, REFRESH_INTERVAL - elapsed)
+
+        @st.fragment(run_every=10)
+        def _live_countdown():
+            _elapsed = time.time() - st.session_state.last_refresh
+            _remaining = max(0, _refresh_interval() - _elapsed)
+            st.sidebar.progress(
+                min(1.0, _elapsed / _refresh_interval()),
+                text=f"🔴 Live – next refresh in {int(_remaining)}s",
+            )
+            if _elapsed >= _refresh_interval():
+                st.rerun()
+
+        _live_countdown()
+
+# ---------------------------------------------------------------------------
 # Render dashboard if data is available
 # ---------------------------------------------------------------------------
 if st.session_state.analysis_done and st.session_state.df is not None:
     df = st.session_state.df
     repo_id = st.session_state.repo
+
+    # Show auto-refresh error banner if present
+    if st.session_state.get("_refresh_error"):
+        st.warning(
+            f"⚠️ Auto-refresh failed (showing previous data): "
+            f"{st.session_state['_refresh_error']}"
+        )
 
     # --- Repository overview ---
     st.divider()
@@ -385,7 +488,14 @@ if st.session_state.analysis_done and st.session_state.df is not None:
             "Add `GEMINI_API_KEY` to `.streamlit/secrets.toml` to enable AI summaries."
         )
     else:
-        # Resolve model once per session
+        # ------------------------------------------------------------------
+        # Resolve / validate the Gemini model
+        # ------------------------------------------------------------------
+        # Always normalise the cached value (guards against stale mixed-case
+        # values stored before the lower-case fix was deployed).
+        if st.session_state.ai_model is not None:
+            st.session_state.ai_model = st.session_state.ai_model.strip().lower()
+
         if st.session_state.ai_model is None:
             with st.spinner("Verifying Gemini model availability…"):
                 resolved = resolve_model(gemini_key, gemini_model_cfg or None)
@@ -396,45 +506,59 @@ if st.session_state.analysis_done and st.session_state.df is not None:
         if not ai_model:
             st.error("No suitable Gemini model found for your API key.")
         else:
-            st.caption(f"Model: `{ai_model}` · Summaries cached for 1 hour")
+            st.caption(f"Model: `{ai_model}` · Summaries cached for 1 hour (errors 60s)")
 
             top5 = summary.head(TOP_SUMMARY)
 
+            # Generate all summaries in parallel before rendering expanders
+            needs_generation = [p for p in top5.index if not _summary_cache_ok(p)]
+            if needs_generation:
+                with st.spinner(f"Generating {len(needs_generation)} AI summary/summaries…"):
+                    _generate_summaries_parallel(top5, df, summary, gemini_key, ai_model)
+
+            # ------------------------------------------------------------------
+            # Check whether every result was a MODEL_404 (bad model name).
+            # If so, reset the cached model so resolve_model picks a good one
+            # on the next rerun, and clear the error cache.
+            # ------------------------------------------------------------------
+            all_404 = all(
+                is_model_404(
+                    st.session_state.ai_summaries.get(p, ("", 0, False))[0]
+                )
+                for p in top5.index
+                if p in st.session_state.ai_summaries
+            ) and any(p in st.session_state.ai_summaries for p in top5.index)
+
+            if all_404:
+                st.session_state.ai_model = None
+                st.session_state.ai_summaries = {}
+                st.warning(
+                    "⚠️ The configured Gemini model was not found. "
+                    f"Switching to the next available model from {PREFERRED_MODELS}. "
+                    "Rerunning…"
+                )
+                st.rerun()
+
+            # Render expanders (all results now in cache)
             for person in top5.index:
-                person_counts = {
-                    k: int(v)
-                    for k, v in summary.loc[person].to_dict().items()
-                    if k != "total"
-                }
-
-                # Collect recent meaningful titles
-                person_df = df[df["person"] == person].head(40)
-                titles = (
-                    person_df["title"]
-                    .dropna()
-                    .loc[person_df["title"].str.strip() != ""]
-                    .tolist()[:15]
-                ) if "title" in person_df.columns else []
-
-                with st.expander(f"🧑‍💻 {person} — {summary.loc[person, 'total']} total contributions"):
-                    if _summary_is_fresh(person):
-                        cached_text = _get_cached_summary(person)
-                        st.write(cached_text)
-                        st.caption("_(cached)_")
+                text = (
+                    _get_cached_summary(person)
+                    if _summary_cache_ok(person)
+                    else "Error: Summary unavailable."
+                )
+                # Convert MODEL_404 sentinel to a friendly message for display
+                if is_model_404(text):
+                    text = (
+                        "Error: Gemini model not found. The app will switch "
+                        "to a working model automatically on the next load."
+                    )
+                label = f"🧑‍💻 {person} — {summary.loc[person, 'total']} total contributions"
+                with st.expander(label):
+                    if text.startswith("Error:"):
+                        st.warning(text)
                     else:
-                        with st.spinner(f"Generating summary for {person}…"):
-                            result = summarize(
-                                person=person,
-                                counts=person_counts,
-                                titles=titles,
-                                api_key=gemini_key,
-                                model=ai_model,
-                            )
-                        if result.startswith("Error:"):
-                            st.warning(result)
-                        else:
-                            _store_summary(person, result)
-                            st.write(result)
+                        st.write(text)
+                        st.caption("_(cached)_")
 
     # --- Downloadable Reports ---
     st.divider()
@@ -472,8 +596,8 @@ if st.session_state.analysis_done and st.session_state.df is not None:
 
     # D. AI summaries CSV (only successfully generated ones)
     ai_rows = []
-    for person, (text, _ts) in st.session_state.ai_summaries.items():
-        if not text.startswith("Error:"):
+    for person, (text, _ts, is_error) in st.session_state.ai_summaries.items():
+        if not is_error:
             ai_rows.append({"contributor": person, "ai_summary": text})
     if ai_rows:
         ai_df = pd.DataFrame(ai_rows)
@@ -487,7 +611,7 @@ if st.session_state.analysis_done and st.session_state.df is not None:
     else:
         r4.info("Generate AI summaries first.")
 
-    # Combined report (all sheets as CSV)
+    # Combined report
     with st.expander("📦 Combined Report (all data)"):
         st.caption("Download a combined CSV containing all report data.")
         combined_parts = []
@@ -509,39 +633,27 @@ if st.session_state.analysis_done and st.session_state.df is not None:
             use_container_width=True,
         )
 
-    # --- Live mode status ---
-    if live_mode:
-        elapsed = time.time() - st.session_state.last_refresh
-        remaining = max(0, REFRESH_INTERVAL - elapsed)
-        st.sidebar.progress(
-            min(1.0, elapsed / REFRESH_INTERVAL),
-            text=f"Refresh in {int(remaining)}s",
-        )
-        # Use st.rerun() with a short sleep for live refresh signalling
-        # This avoids blocking – Streamlit re-runs the entire script on rerun()
-        time.sleep(1)
-        st.rerun()
-
 elif not st.session_state.analysis_done:
     st.info("👆 Enter a GitHub repository URL above and click **Analyse Repository** to begin.")
     with st.expander("ℹ️ About FairShare"):
         st.markdown("""
-**FairShare – Team Contribution Intelligence** analyses real GitHub repository activity 
+**FairShare – Team Contribution Intelligence** analyses real GitHub repository activity
 to give a fair picture of each team member's contributions.
 
 **Features:**
-- 📊 Contributor statistics (commits, PRs, issues, comments)  
-- 📅 Weekly activity timeline  
-- 🚨 Inactive member alerts (30-day threshold)  
-- 🤖 AI-generated contributor summaries (requires Gemini API key)  
-- 👤 Duplicate username identity mapping  
-- 🔴 Live auto-refresh every 5 minutes  
-- 📥 Downloadable CSV reports  
+- 📊 Contributor statistics (commits, PRs, issues, comments)
+- 📅 Weekly activity timeline
+- 🚨 Inactive member alerts (30-day threshold)
+- 🤖 AI-generated contributor summaries (requires Gemini API key)
+- 👤 Duplicate username identity mapping
+- 🔴 Live auto-refresh every 5 minutes
+- 📥 Downloadable CSV reports
 
 **Setup:** Add your credentials to `.streamlit/secrets.toml`:
 ```toml
-GITHUB_TOKEN = "ghp_..."
+GITHUB_TOKEN   = "ghp_..."
 GEMINI_API_KEY = "AIza..."
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL   = "gemini-2.0-flash"
+REFRESH_SECONDS = 300
 ```
         """)
