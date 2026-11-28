@@ -19,7 +19,7 @@ from summarizer import summarize, resolve_model, is_model_404, PREFERRED_MODELS
 # Page config
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="FairShare – Team Contribution Intelligence",
+    page_title="FairShare",
     page_icon="📊",
     layout="wide",
 )
@@ -29,6 +29,8 @@ TOP_N = 10                      # top-N contributors for statistics
 TOP_SUMMARY = 5                 # contributors to summarise with AI
 SUMMARY_TTL = 3600              # seconds to cache successful AI summaries
 SUMMARY_ERR_TTL = 60            # seconds to cache failed AI summaries
+ACTIVITY_TYPES = ["commit", "pull_request", "issue", "comment"]
+ACTIVITY_COLORS = ["#2563EB", "#16A34A", "#D97706", "#9333EA"]
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +245,20 @@ def _generate_summaries_parallel(top5, df, summary, gemini_key, ai_model):
             _store_summary(person, text)
 
 
+def _format_error_hint(message: str) -> str:
+    """Append a plain-language hint to common GitHub/input error messages."""
+    low = message.lower()
+    if "404" in low or "not found" in low:
+        return f"{message} — Check the URL and make sure the repository exists and is accessible."
+    if "rate limit" in low or "403" in low or "429" in low:
+        return f"{message} — Rate limit reached: try again later or configure a GITHUB_TOKEN."
+    if "401" in low or "unauthorized" in low or "bad credentials" in low:
+        return f"{message} — Check your GITHUB_TOKEN in .streamlit/secrets.toml."
+    if "timed out" in low or "timeout" in low or "connection" in low:
+        return f"{message} — Network issue: check your connection and try again."
+    return message
+
+
 # ===========================================================================
 # SIDEBAR
 # ===========================================================================
@@ -253,10 +269,17 @@ with st.sidebar:
 
     # Live mode
     live_mode = st.checkbox(
-        "🔴 Live Mode (auto-refresh every 5 min)",
+        f"🔴 Live Mode (every {REFRESH_INTERVAL}s)",
         value=st.session_state.live_mode,
+        help="Automatically re-fetch repository activity on the configured interval.",
     )
     st.session_state.live_mode = live_mode
+
+    if live_mode and st.session_state.last_refresh > 0:
+        last_ts = datetime.datetime.fromtimestamp(
+            st.session_state.last_refresh
+        ).strftime("%H:%M:%S")
+        st.caption(f"🕐 Last updated at {last_ts}")
 
     st.divider()
 
@@ -305,20 +328,19 @@ with st.sidebar:
 # ===========================================================================
 # MAIN AREA
 # ===========================================================================
-st.title("📊 FairShare – Team Contribution Intelligence")
-st.caption("Analyse real GitHub repository activity to understand team contributions.")
+st.title("📊 FairShare")
+st.caption("Team contribution intelligence powered by real GitHub activity.")
 
 # ---------------------------------------------------------------------------
-# Repository input
+# Repository input row
 # ---------------------------------------------------------------------------
-url = st.text_input(
-    "🔗 Paste a GitHub repository URL",
+col_url, col_btn, col_clear = st.columns([5, 1.5, 1], vertical_alignment="bottom")
+url = col_url.text_input(
+    "🔗 GitHub Repository URL",
     value="https://github.com/Shafiya05/fairshare",
     placeholder="https://github.com/owner/repo",
 )
-
-col_btn, col_clear = st.columns([2, 1])
-analyse_clicked = col_btn.button("🔍 Analyse Repository", type="primary", use_container_width=True)
+analyse_clicked = col_btn.button("🔍 Analyse", type="primary", use_container_width=True)
 if col_clear.button("🗑️ Clear", use_container_width=True):
     st.session_state.df = None
     st.session_state.analysis_done = False
@@ -339,21 +361,24 @@ if analyse_clicked:
     try:
         repo_id = parse_repo(url)
     except ValueError as e:
-        st.error(str(e))
+        st.error(f"⚠️ {e} Check the URL format (e.g. https://github.com/owner/repo).")
         st.stop()
 
-    with st.spinner(f"Fetching data for **{repo_id}** …"):
+    with st.spinner(f"Fetching activity for **{repo_id}**…"):
         try:
             raw_df = load_data(repo_id, token)
         except RuntimeError as e:
-            st.error(str(e))
+            st.error(f"⚠️ {_format_error_hint(str(e))}")
             st.stop()
         except Exception as e:
-            st.error(f"Unexpected error fetching data: {e}")
+            st.error(f"⚠️ {_format_error_hint(f'Unexpected error fetching data: {e}')}")
             st.stop()
 
     if raw_df is None or raw_df.empty:
-        st.warning("No activity data found for this repository.")
+        st.info(
+            "📭 This repository has no recorded commits, pull requests, issues, or comments yet. "
+            "Check the URL or try a repository with recent activity."
+        )
         st.stop()
 
     df = apply_identity_map(raw_df, st.session_state.identity_map)
@@ -392,8 +417,6 @@ if live_mode and st.session_state.analysis_done:
 
     else:
         # Show a countdown that updates every 10 seconds (not every second)
-        remaining = max(0, REFRESH_INTERVAL - elapsed)
-
         @st.fragment(run_every=10)
         def _live_countdown():
             _elapsed = time.time() - st.session_state.last_refresh
@@ -418,242 +441,286 @@ if st.session_state.analysis_done and st.session_state.df is not None:
     if st.session_state.get("_refresh_error"):
         st.warning(
             f"⚠️ Auto-refresh failed (showing previous data): "
-            f"{st.session_state['_refresh_error']}"
+            f"{_format_error_hint(st.session_state['_refresh_error'])}"
         )
 
-    # --- Repository overview ---
-    st.divider()
-    st.subheader(f"📁 Repository: `{repo_id}`")
-    ov1, ov2, ov3, ov4 = st.columns(4)
-    ov1.metric("Total Activities", len(df))
-    ov2.metric("Contributors", df["person"].nunique())
-    ov3.metric("Activity Types", df["type"].nunique())
-    if not df.empty:
-        date_range = f"{df['date'].min().date()} → {df['date'].max().date()}"
-        ov4.metric("Date Range", date_range)
+    if live_mode and st.session_state.last_refresh > 0:
+        last_ts = datetime.datetime.fromtimestamp(
+            st.session_state.last_refresh
+        ).strftime("%H:%M:%S")
+        st.caption(f"🔴 Live Mode active · Last updated at {last_ts}")
 
-    # --- Contributor statistics ---
-    st.divider()
-    st.subheader("👥 Contributor Statistics")
-
+    # Pre-compute contributor summary & weekly timeline
     summary = pd.crosstab(df["person"], df["type"])
+    summary = summary.reindex(columns=ACTIVITY_TYPES, fill_value=0)
     summary["total"] = summary.sum(axis=1)
     summary = summary.sort_values("total", ascending=False).head(TOP_N)
 
-    st.dataframe(summary, use_container_width=True)
-
-    # --- Contribution split ---
-    st.subheader("📊 Contribution Split")
-    chart_data = summary.drop(columns="total")
-    st.bar_chart(chart_data, use_container_width=True)
-
-    # --- Weekly activity timeline ---
-    st.divider()
-    st.subheader("📅 Activity Timeline (per week)")
     weekly = (
         df.set_index("date")
         .groupby([pd.Grouper(freq="W"), "type"])
         .size()
         .unstack(fill_value=0)
+        .reindex(columns=ACTIVITY_TYPES, fill_value=0)
     )
-    st.line_chart(weekly, use_container_width=True)
-    with st.expander("📋 Weekly activity table"):
-        st.dataframe(weekly, use_container_width=True)
 
-    # --- Inactive member alerts ---
-    st.divider()
-    st.subheader(f"🚨 Inactive Members (no activity in {INACTIVE_DAYS} days)")
-    now_utc = pd.Timestamp.now(tz="UTC")
-    last_activity = df.groupby("person")["date"].max()
     inactive_df = build_inactive_df(df, summary)
 
-    inactive_only = inactive_df[inactive_df["status"] == "INACTIVE"]
-    if inactive_only.empty:
-        st.success("✅ Everyone in the top 10 has been active recently.")
-    else:
-        for _, row in inactive_only.iterrows():
-            st.warning(
-                f"⚠️ **{row['contributor']}** – last activity "
-                f"{row['days_since_last_activity']} days ago "
-                f"({row['last_activity_date'].date() if pd.notna(row['last_activity_date']) else 'unknown'})"
+    # --- Top KPI metric row (5 cards) ---
+    top_person = str(summary.index[0]) if not summary.empty else "—"
+    top_total = int(summary.iloc[0]["total"]) if not summary.empty else 0
+    date_range = (
+        f"{df['date'].min().date()} → {df['date'].max().date()}"
+        if not df.empty
+        else "—"
+    )
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("📁 Repository", repo_id)
+    m2.metric("📊 Total Activities", f"{len(df):,}")
+    m3.metric("👥 Contributors", df["person"].nunique())
+    m4.metric("📅 Date Range", date_range)
+    m5.metric("🏆 Top Contributor", top_person, delta=f"{top_total} activities", delta_color="off")
+
+    st.divider()
+
+    # --- Tabbed results ---
+    tab_overview, tab_timeline, tab_members, tab_ai, tab_reports = st.tabs([
+        "📊 Overview",
+        "📅 Timeline",
+        "👥 Members",
+        "🤖 AI Summaries",
+        "📥 Reports",
+    ])
+
+    # -----------------------------------------------------------------------
+    # Tab 1: Overview (bar chart + raw numbers side-by-side)
+    # -----------------------------------------------------------------------
+    with tab_overview:
+        st.subheader("📊 Contribution Split & Statistics")
+        st.caption(
+            f"Shows the top {TOP_N} contributors broken down by commits, pull requests, "
+            "issues, and comments."
+        )
+        chart_data = summary.drop(columns="total").reindex(columns=ACTIVITY_TYPES, fill_value=0)
+        col_chart, col_table = st.columns([3, 2])
+        with col_chart:
+            st.bar_chart(chart_data, color=ACTIVITY_COLORS, use_container_width=True)
+        with col_table:
+            st.dataframe(summary, use_container_width=True)
+
+    # -----------------------------------------------------------------------
+    # Tab 2: Timeline (weekly chart + table side-by-side)
+    # -----------------------------------------------------------------------
+    with tab_timeline:
+        st.subheader("📅 Weekly Activity Timeline")
+        st.caption(
+            "Tracks how commits, pull requests, issues, and comments change week by week."
+        )
+        col_wchart, col_wtable = st.columns([3, 2])
+        with col_wchart:
+            st.line_chart(weekly, color=ACTIVITY_COLORS, use_container_width=True)
+        with col_wtable:
+            st.dataframe(weekly, use_container_width=True)
+
+    # -----------------------------------------------------------------------
+    # Tab 3: Members (inactive alerts + identity mapping result)
+    # -----------------------------------------------------------------------
+    with tab_members:
+        st.subheader(f"🚨 Inactive Members ({INACTIVE_DAYS}-day threshold)")
+        st.caption(
+            f"Highlights top contributors who have no recorded activity in the past {INACTIVE_DAYS} days."
+        )
+
+        inactive_only = inactive_df[inactive_df["status"] == "INACTIVE"]
+        if inactive_only.empty:
+            st.success("✅ Everyone in the top 10 has been active recently.")
+        else:
+            for _, row in inactive_only.iterrows():
+                st.warning(
+                    f"⚠️ **{row['contributor']}** – last activity "
+                    f"{row['days_since_last_activity']} days ago "
+                    f"({row['last_activity_date'].date() if pd.notna(row['last_activity_date']) else 'unknown'})"
+                )
+
+        st.divider()
+        st.subheader("👤 Identity Mapping Result")
+        st.caption(
+            "Shows GitHub usernames merged under a single contributor name using the sidebar rules."
+        )
+        if st.session_state.identity_map:
+            map_rows = []
+            for display, logins in st.session_state.identity_map.items():
+                matched = int(df[df["person"] == display].shape[0])
+                map_rows.append({
+                    "Display Name": display,
+                    "Mapped Usernames": ", ".join(logins),
+                    "Matched Activities": matched,
+                })
+            st.dataframe(pd.DataFrame(map_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info(
+                "ℹ️ No identity mappings configured. Use **Identity Mapping** in the sidebar to merge duplicate usernames."
             )
 
-    # --- AI Contributor Summaries ---
-    st.divider()
-    st.subheader("🤖 AI Contributor Summaries")
-
-    if not gemini_key:
-        st.info(
-            "ℹ️ Gemini API key not configured. "
-            "Add `GEMINI_API_KEY` to `.streamlit/secrets.toml` to enable AI summaries."
+    # -----------------------------------------------------------------------
+    # Tab 4: AI Summaries
+    # -----------------------------------------------------------------------
+    with tab_ai:
+        st.subheader("🤖 AI Contributor Summaries")
+        st.caption(
+            f"Generates concise two-sentence summaries for the top {TOP_SUMMARY} contributors based on their recorded activity."
         )
-    else:
-        # ------------------------------------------------------------------
-        # Resolve / validate the Gemini model
-        # ------------------------------------------------------------------
-        # Always normalise the cached value (guards against stale mixed-case
-        # values stored before the lower-case fix was deployed).
-        if st.session_state.ai_model is not None:
-            st.session_state.ai_model = st.session_state.ai_model.strip().lower()
 
-        if st.session_state.ai_model is None:
-            with st.spinner("Verifying Gemini model availability…"):
-                resolved = resolve_model(gemini_key, gemini_model_cfg or None)
-            st.session_state.ai_model = resolved
-
-        ai_model = st.session_state.ai_model
-
-        if not ai_model:
-            st.error("No suitable Gemini model found for your API key.")
+        if not gemini_key:
+            st.info(
+                "ℹ️ Gemini API key not configured. "
+                "Add `GEMINI_API_KEY` to `.streamlit/secrets.toml` to enable AI summaries."
+            )
         else:
-            st.caption(f"Model: `{ai_model}` · Summaries cached for 1 hour (errors 60s)")
+            # Always normalise the cached value (guards against stale mixed-case
+            # values stored before the lower-case fix was deployed).
+            if st.session_state.ai_model is not None:
+                st.session_state.ai_model = st.session_state.ai_model.strip().lower()
 
-            top5 = summary.head(TOP_SUMMARY)
+            if st.session_state.ai_model is None:
+                with st.spinner("Verifying Gemini model availability…"):
+                    resolved = resolve_model(gemini_key, gemini_model_cfg or None)
+                st.session_state.ai_model = resolved
 
-            # Generate all summaries in parallel before rendering expanders
-            needs_generation = [p for p in top5.index if not _summary_cache_ok(p)]
-            if needs_generation:
-                with st.spinner(f"Generating {len(needs_generation)} AI summary/summaries…"):
-                    _generate_summaries_parallel(top5, df, summary, gemini_key, ai_model)
+            ai_model = st.session_state.ai_model
 
-            # ------------------------------------------------------------------
-            # Check whether every result was a MODEL_404 (bad model name).
-            # If so, reset the cached model so resolve_model picks a good one
-            # on the next rerun, and clear the error cache.
-            # ------------------------------------------------------------------
-            all_404 = all(
-                is_model_404(
-                    st.session_state.ai_summaries.get(p, ("", 0, False))[0]
+            if not ai_model:
+                st.error("No suitable Gemini model found for your API key.")
+            else:
+                st.caption(f"Model: `{ai_model}` · Summaries cached for 1 hour (errors 60s)")
+
+                top5 = summary.head(TOP_SUMMARY)
+
+                # Generate all summaries in parallel before rendering expanders
+                needs_generation = [p for p in top5.index if not _summary_cache_ok(p)]
+                if needs_generation:
+                    with st.spinner(f"Generating {len(needs_generation)} AI summary/summaries…"):
+                        _generate_summaries_parallel(top5, df, summary, gemini_key, ai_model)
+
+                generated = [
+                    p for p in top5.index
+                    if p in st.session_state.ai_summaries
+                ]
+                all_404 = bool(generated) and all(
+                    is_model_404(st.session_state.ai_summaries[p][0])
+                    for p in generated
                 )
-                for p in top5.index
-                if p in st.session_state.ai_summaries
-            ) and any(p in st.session_state.ai_summaries for p in top5.index)
 
-            if all_404:
-                st.session_state.ai_model = None
-                st.session_state.ai_summaries = {}
-                st.warning(
-                    "⚠️ The configured Gemini model was not found. "
-                    f"Switching to the next available model from {PREFERRED_MODELS}. "
-                    "Rerunning…"
-                )
-                st.rerun()
-
-            # Render expanders (all results now in cache)
-            for person in top5.index:
-                text = (
-                    _get_cached_summary(person)
-                    if _summary_cache_ok(person)
-                    else "Error: Summary unavailable."
-                )
-                # Convert MODEL_404 sentinel to a friendly message for display
-                if is_model_404(text):
-                    text = (
-                        "Error: Gemini model not found. The app will switch "
-                        "to a working model automatically on the next load."
+                if all_404:
+                    st.warning(
+                        "AI summaries are unavailable: check GEMINI_MODEL in secrets.toml"
                     )
-                label = f"🧑‍💻 {person} — {summary.loc[person, 'total']} total contributions"
-                with st.expander(label):
-                    if text.startswith("Error:"):
-                        st.warning(text)
-                    else:
-                        st.write(text)
-                        st.caption("_(cached)_")
+                else:
+                    for person in top5.index:
+                        text = (
+                            _get_cached_summary(person)
+                            if _summary_cache_ok(person)
+                            else "Error: Summary unavailable."
+                        )
+                        if is_model_404(text):
+                            text = "Error: Gemini model not found – check GEMINI_MODEL in secrets.toml."
+                        label = f"🧑‍💻 {person} — {summary.loc[person, 'total']} total contributions"
+                        with st.expander(label):
+                            if text.startswith("Error:"):
+                                st.warning(text)
+                            else:
+                                st.write(text)
+                                st.caption("_(cached)_")
 
-    # --- Downloadable Reports ---
-    st.divider()
-    st.subheader("📥 Downloadable Reports")
+    # -----------------------------------------------------------------------
+    # Tab 5: Reports (CSV downloads)
+    # -----------------------------------------------------------------------
+    with tab_reports:
+        st.subheader("📥 Downloadable Reports")
+        st.caption("Export contributor statistics, weekly trends, inactivity alerts, or AI summaries as CSV files.")
 
-    r1, r2, r3, r4 = st.columns(4)
+        r1, r2, r3, r4 = st.columns(4)
 
-    # A. Contributor statistics CSV
-    summary_export = build_summary_df(summary, df)
-    r1.download_button(
-        label="📄 Contributor Stats (CSV)",
-        data=df_to_csv(summary_export),
-        file_name=f"fairshare_{repo_id.replace('/', '_')}_contributors.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
-    # B. Weekly activity CSV
-    r2.download_button(
-        label="📅 Weekly Activity (CSV)",
-        data=df_to_csv(weekly),
-        file_name=f"fairshare_{repo_id.replace('/', '_')}_weekly.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
-    # C. Inactive members CSV
-    r3.download_button(
-        label="🚨 Inactive Members (CSV)",
-        data=inactive_df.to_csv(index=False).encode("utf-8"),
-        file_name=f"fairshare_{repo_id.replace('/', '_')}_inactive.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
-    # D. AI summaries CSV (only successfully generated ones)
-    ai_rows = []
-    for person, (text, _ts, is_error) in st.session_state.ai_summaries.items():
-        if not is_error:
-            ai_rows.append({"contributor": person, "ai_summary": text})
-    if ai_rows:
-        ai_df = pd.DataFrame(ai_rows)
-        r4.download_button(
-            label="🤖 AI Summaries (CSV)",
-            data=ai_df.to_csv(index=False).encode("utf-8"),
-            file_name=f"fairshare_{repo_id.replace('/', '_')}_ai_summaries.csv",
+        # A. Contributor statistics CSV
+        summary_export = build_summary_df(summary, df)
+        r1.download_button(
+            label="📄 Contributor Stats (CSV)",
+            data=df_to_csv(summary_export),
+            file_name=f"fairshare_{repo_id.replace('/', '_')}_contributors.csv",
             mime="text/csv",
             use_container_width=True,
         )
-    else:
-        r4.info("Generate AI summaries first.")
 
-    # Combined report
-    with st.expander("📦 Combined Report (all data)"):
-        st.caption("Download a combined CSV containing all report data.")
-        combined_parts = []
-        combined_parts.append("=== CONTRIBUTOR STATISTICS ===")
-        combined_parts.append(summary_export.to_csv(index=True))
-        combined_parts.append("\n=== WEEKLY ACTIVITY ===")
-        combined_parts.append(weekly.to_csv(index=True))
-        combined_parts.append("\n=== INACTIVE MEMBERS ===")
-        combined_parts.append(inactive_df.to_csv(index=False))
+        # B. Weekly activity CSV
+        r2.download_button(
+            label="📅 Weekly Activity (CSV)",
+            data=df_to_csv(weekly),
+            file_name=f"fairshare_{repo_id.replace('/', '_')}_weekly.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+        # C. Inactive members CSV
+        r3.download_button(
+            label="🚨 Inactive Members (CSV)",
+            data=inactive_df.to_csv(index=False).encode("utf-8"),
+            file_name=f"fairshare_{repo_id.replace('/', '_')}_inactive.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+        # D. AI summaries CSV (only successfully generated ones)
+        ai_rows = []
+        for person, (text, _ts, is_error) in st.session_state.ai_summaries.items():
+            if not is_error:
+                ai_rows.append({"contributor": person, "ai_summary": text})
         if ai_rows:
-            combined_parts.append("\n=== AI SUMMARIES ===")
-            combined_parts.append(pd.DataFrame(ai_rows).to_csv(index=False))
-        combined_csv = "\n".join(combined_parts).encode("utf-8")
-        st.download_button(
-            label="⬇️ Download Combined Report (CSV)",
-            data=combined_csv,
-            file_name=f"fairshare_{repo_id.replace('/', '_')}_combined.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
+            ai_df = pd.DataFrame(ai_rows)
+            r4.download_button(
+                label="🤖 AI Summaries (CSV)",
+                data=ai_df.to_csv(index=False).encode("utf-8"),
+                file_name=f"fairshare_{repo_id.replace('/', '_')}_ai_summaries.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        else:
+            r4.info("Generate AI summaries first.")
+
+        # Combined report
+        with st.expander("📦 Combined Report (all data)"):
+            st.caption("Download a single CSV containing all report sections.")
+            combined_parts = []
+            combined_parts.append("=== CONTRIBUTOR STATISTICS ===")
+            combined_parts.append(summary_export.to_csv(index=True))
+            combined_parts.append("\n=== WEEKLY ACTIVITY ===")
+            combined_parts.append(weekly.to_csv(index=True))
+            combined_parts.append("\n=== INACTIVE MEMBERS ===")
+            combined_parts.append(inactive_df.to_csv(index=False))
+            if ai_rows:
+                combined_parts.append("\n=== AI SUMMARIES ===")
+                combined_parts.append(pd.DataFrame(ai_rows).to_csv(index=False))
+            combined_csv = "\n".join(combined_parts).encode("utf-8")
+            st.download_button(
+                label="⬇️ Download Combined Report (CSV)",
+                data=combined_csv,
+                file_name=f"fairshare_{repo_id.replace('/', '_')}_combined.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
 
 elif not st.session_state.analysis_done:
-    st.info("👆 Enter a GitHub repository URL above and click **Analyse Repository** to begin.")
+    st.info(
+        "👋 Paste a public or accessible GitHub repository URL above and click **Analyse** to inspect contributor activity, timelines, inactivity alerts, and AI summaries."
+    )
     with st.expander("ℹ️ About FairShare"):
         st.markdown("""
-**FairShare – Team Contribution Intelligence** analyses real GitHub repository activity
-to give a fair picture of each team member's contributions.
+**FairShare** analyses real GitHub repository activity to give a clear, fair picture of each team member's contributions.
 
-**Features:**
-- 📊 Contributor statistics (commits, PRs, issues, comments)
-- 📅 Weekly activity timeline
-- 🚨 Inactive member alerts (30-day threshold)
-- 🤖 AI-generated contributor summaries (requires Gemini API key)
-- 👤 Duplicate username identity mapping
-- 🔴 Live auto-refresh every 5 minutes
-- 📥 Downloadable CSV reports
-
-**Setup:** Add your credentials to `.streamlit/secrets.toml`:
-```toml
-GITHUB_TOKEN   = "ghp_..."
-GEMINI_API_KEY = "AIza..."
-GEMINI_MODEL   = "gemini-2.0-flash"
-REFRESH_SECONDS = 300
-```
+**What you get:**
+- 📊 **Overview**: Contributor bar chart and raw counts across commits, PRs, issues, and comments
+- 📅 **Timeline**: Weekly activity trends and data table
+- 👥 **Members**: 30-day inactivity alerts and username identity mapping
+- 🤖 **AI Summaries**: Two-sentence contributor summaries powered by Gemini
+- 📥 **Reports**: Individual and combined CSV downloads
         """)
