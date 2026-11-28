@@ -6,6 +6,7 @@ Streamlit dashboard for GitHub repository activity analysis.
 import html
 import io
 import json
+import random
 import time
 import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -68,6 +69,8 @@ def _init_state():
         "ai_summaries": {},         # {person: (summary_text, timestamp, is_error)}
         "ai_model": None,
         "analysis_done": False,
+        "is_sample": False,
+        "repo_url": "https://github.com/Shafiya05/fairshare",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -473,31 +476,100 @@ def inject_css():
             line-height: 1.5;
             opacity: 0.92;
         }
-        /* Empty state step cards */
-        .fs-step-card {
+        /* Home hook: animated gradient + contribution grid */
+        @keyframes fs-gradient-shift {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+        @keyframes fs-cell-pulse {
+            0%, 100% { opacity: 0.72; transform: scale(1); }
+            50% { opacity: 1; transform: scale(1.08); }
+        }
+        .fs-hook {
+            background: linear-gradient(125deg, rgba(79, 70, 229, 0.22), rgba(13, 148, 136, 0.22), rgba(37, 99, 235, 0.18));
+            background-size: 200% 200%;
+            animation: fs-gradient-shift 14s ease infinite;
+            border: 1px solid rgba(128, 128, 128, 0.22);
+            border-radius: 14px;
+            padding: 1.35rem 1.5rem;
+            margin-top: 0.5rem;
+            margin-bottom: 1rem;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1.25rem;
+        }
+        .fs-hook-text {
+            flex: 1 1 280px;
+        }
+        .fs-hook-title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin: 0 0 0.3rem 0;
+            letter-spacing: -0.02em;
+        }
+        .fs-hook-sub {
+            font-size: 0.94rem;
+            opacity: 0.85;
+            margin: 0;
+            line-height: 1.45;
+        }
+        .fs-contrib-grid {
+            display: grid;
+            grid-template-columns: repeat(20, 10px);
+            grid-template-rows: repeat(7, 10px);
+            gap: 3px;
+        }
+        .fs-cell {
+            width: 10px;
+            height: 10px;
+            border-radius: 2px;
+            animation: fs-cell-pulse 4s ease-in-out infinite;
+        }
+        .fs-c0 { background: rgba(128, 128, 128, 0.16); }
+        .fs-c1 { background: rgba(13, 148, 136, 0.32); }
+        .fs-c2 { background: rgba(13, 148, 136, 0.54); }
+        .fs-c3 { background: rgba(13, 148, 136, 0.78); }
+        .fs-c4 { background: rgba(79, 70, 229, 0.85); }
+        @media (prefers-reduced-motion: reduce) {
+            .fs-hook, .fs-cell {
+                animation: none !important;
+            }
+        }
+        /* Preview card */
+        .fs-preview-card {
             background: rgba(128, 128, 128, 0.08);
             border: 1px solid rgba(128, 128, 128, 0.18);
             border-radius: 12px;
-            padding: 1rem 1.1rem;
-            height: 100%;
+            padding: 1rem 1.15rem;
+            margin-bottom: 0.9rem;
         }
-        .fs-step-num {
-            font-size: 0.75rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            opacity: 0.68;
-            margin-bottom: 0.25rem;
+        .fs-preview-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.5rem;
+            margin-bottom: 0.75rem;
         }
-        .fs-step-title {
+        .fs-preview-title {
             font-size: 1rem;
-            font-weight: 600;
-            margin-bottom: 0.3rem;
+            font-weight: 700;
         }
-        .fs-step-desc {
-            font-size: 0.86rem;
-            opacity: 0.8;
-            line-height: 1.45;
+        .fs-sample-pill {
+            font-size: 0.72rem;
+            font-weight: 700;
+            padding: 0.18rem 0.6rem;
+            border-radius: 999px;
+            background: rgba(217, 119, 6, 0.16);
+            border: 1px solid rgba(217, 119, 6, 0.45);
+            color: #d97706;
+        }
+        .fs-home-note {
+            font-size: 0.84rem;
+            opacity: 0.75;
+            margin-top: 0.9rem;
         }
         /* Clearer, larger tab labels */
         .stTabs [data-baseweb="tab-list"] {
@@ -691,19 +763,89 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+def _set_example_url(repo_slug: str):
+    """Fill the URL input box with an example repository without auto-analysing."""
+    st.session_state["repo_url"] = f"https://github.com/{repo_slug}"
+
+
+def _build_sample_df() -> pd.DataFrame:
+    """Return a deterministic sample DataFrame matching real repository columns."""
+    rng = random.Random(42)
+    now = pd.Timestamp.now(tz="UTC")
+    specs = [
+        ("Aarav", 52, 0, 21, [
+            "Implement OAuth session refresh",
+            "Refactor API retry helper",
+            "Add unit tests for parser",
+            "Review PR #42 edge cases",
+        ]),
+        ("Meera", 27, 1, 24, [
+            "Design responsive dashboard cards",
+            "Fix dark mode contrast",
+            "Update contributor chart tooltips",
+            "Review layout PR #38",
+        ]),
+        ("Kabir", 14, 2, 28, [
+            "Add CSV export headers",
+            "Document setup steps in README",
+            "Investigate rate limit handling",
+            "Comment on issue #19",
+        ]),
+        ("Zoya", 7, 45, 58, [
+            "Initial project scaffolding",
+            "Configure CI workflow",
+            "Open issue #4 for test fixtures",
+            "Comment on architecture notes",
+        ]),
+    ]
+    rows = []
+    for person, count, min_days_ago, max_days_ago, titles in specs:
+        for i in range(count):
+            days_ago = min_days_ago if i == 0 else rng.randint(min_days_ago, max_days_ago)
+            hours_offset = rng.randint(0, 20)
+            ts = now - pd.Timedelta(days=days_ago, hours=hours_offset)
+            act_type = rng.choices(
+                ACTIVITY_TYPES,
+                weights=[0.5, 0.2, 0.15, 0.15],
+                k=1,
+            )[0]
+            rows.append({
+                "date": ts,
+                "person": person,
+                "type": act_type,
+                "title": titles[i % len(titles)],
+            })
+    return pd.DataFrame(rows, columns=["date", "person", "type", "title"])
+
+
+def _build_contrib_grid_html() -> str:
+    """Build a decorative 7x20 GitHub-style contribution grid with staggered pulse."""
+    rng = random.Random(42)
+    cells = []
+    for col in range(20):
+        for row in range(7):
+            level = rng.choices([0, 1, 2, 3, 4], weights=[35, 25, 20, 13, 7], k=1)[0]
+            delay = ((col + row) % 10) * 0.35
+            cells.append(
+                f'<div class="fs-cell fs-c{level}" style="animation-delay: {delay:.2f}s;"></div>'
+            )
+    return f'<div class="fs-contrib-grid" aria-hidden="true">{"".join(cells)}</div>'
+
+
 # ---------------------------------------------------------------------------
 # Repository input row
 # ---------------------------------------------------------------------------
 col_url, col_btn, col_clear = st.columns([5, 1.5, 1], vertical_alignment="bottom")
 url = col_url.text_input(
     "🔗 GitHub Repository URL",
-    value="https://github.com/allenai/OLMo-core",
+    key="repo_url",
     placeholder="https://github.com/owner/repo",
 )
 analyse_clicked = col_btn.button("🔍 Analyse", type="primary", use_container_width=True)
 if col_clear.button("🗑️ Clear", type="secondary", use_container_width=True):
     st.session_state.df = None
     st.session_state.analysis_done = False
+    st.session_state.is_sample = False
     st.session_state.ai_summaries = {}
     st.rerun()
 
@@ -747,12 +889,13 @@ if analyse_clicked:
     st.session_state.df = df
     st.session_state.repo = repo_id
     st.session_state.analysis_done = True
+    st.session_state.is_sample = False
     st.session_state.last_refresh = time.time()
 
 # ---------------------------------------------------------------------------
 # Live-mode: countdown fragment + auto-refresh logic
 # ---------------------------------------------------------------------------
-if live_mode and st.session_state.analysis_done:
+if live_mode and st.session_state.analysis_done and not st.session_state.get("is_sample", False):
     REFRESH_INTERVAL = _refresh_interval()
 
     elapsed = time.time() - st.session_state.last_refresh
@@ -804,11 +947,17 @@ if st.session_state.analysis_done and st.session_state.df is not None:
             f"{_format_error_hint(st.session_state['_refresh_error'])}"
         )
 
-    if live_mode and st.session_state.last_refresh > 0:
+    if live_mode and st.session_state.last_refresh > 0 and not st.session_state.get("is_sample", False):
         last_ts = datetime.datetime.fromtimestamp(
             st.session_state.last_refresh
         ).strftime("%H:%M:%S")
         st.caption(f"🔴 Live Mode active · Last updated at {last_ts}")
+
+    if st.session_state.get("is_sample"):
+        st.info(
+            "🧪 **Sample data** — Viewing a built-in demo team (`sample/team-project`). "
+            "Paste a GitHub repository URL above and click **Analyse** to inspect a real repo."
+        )
 
     # Pre-compute contributor summary & weekly timeline
     summary = pd.crosstab(df["person"], df["type"])
@@ -1124,31 +1273,91 @@ if st.session_state.analysis_done and st.session_state.df is not None:
             )
 
 elif not st.session_state.analysis_done:
-    st.info(
-        "👋 Ready to analyse a repository. Paste a GitHub URL above and click **Analyse** to begin."
-    )
-    s1, s2, s3 = st.columns(3)
-    s1.markdown(
-        '<div class="fs-step-card">'
-        '<div class="fs-step-num">Step 1</div>'
-        '<div class="fs-step-title">🔗 Connect Repository</div>'
-        '<div class="fs-step-desc">Paste any public or token-accessible GitHub repository URL and click Analyse.</div>'
-        '</div>',
+    st.markdown(
+        f"""
+        <div class="fs-hook">
+            <div class="fs-hook-text">
+                <div class="fs-hook-title">Who really did the work?</div>
+                <p class="fs-hook-sub">
+                    See every commit, pull request, issue, and review comment in one fair view —
+                    without guesswork or noisy merge commits.
+                </p>
+            </div>
+            {_build_contrib_grid_html()}
+        </div>
+        """,
         unsafe_allow_html=True,
     )
-    s2.markdown(
-        '<div class="fs-step-card">'
-        '<div class="fs-step-num">Step 2</div>'
-        '<div class="fs-step-title">📊 Explore Team Activity</div>'
-        '<div class="fs-step-desc">Review contributor rankings, weekly timelines, inactivity alerts, and identity mappings.</div>'
-        '</div>',
+
+    preview_members = [
+        ("Aarav", "AA", 52),
+        ("Meera", "ME", 27),
+        ("Kabir", "KA", 14),
+        ("Zoya", "ZO", 7),
+    ]
+    preview_rows_html = []
+    for idx, (name, initials, pct) in enumerate(preview_members):
+        preview_rows_html.append(
+            f'<div class="fs-leader-card">'
+            f'<div class="fs-rank">#{idx + 1}</div>'
+            f'<div class="fs-avatar"><span>{initials}</span></div>'
+            f'<div class="fs-leader-body">'
+            f'<div class="fs-leader-head">'
+            f'<span class="fs-leader-name">{name}</span>'
+            f'<span class="fs-leader-count">{pct} activities ({pct}%)</span>'
+            f'</div>'
+            f'<div class="fs-progress-track">'
+            f'<div class="fs-progress-fill" style="width: {pct}%;"></div>'
+            f'</div></div></div>'
+        )
+
+    st.markdown(
+        f"""
+        <div class="fs-preview-card">
+            <div class="fs-preview-head">
+                <span class="fs-preview-title">👀 See it in action</span>
+                <span class="fs-sample-pill">Sample data</span>
+            </div>
+            {"".join(preview_rows_html)}
+        </div>
+        """,
         unsafe_allow_html=True,
     )
-    s3.markdown(
-        '<div class="fs-step-card">'
-        '<div class="fs-step-num">Step 3</div>'
-        '<div class="fs-step-title">🤖 Summarise & Export</div>'
-        '<div class="fs-step-desc">Read AI-generated contributor summaries and download individual or combined CSV reports.</div>'
-        '</div>',
+
+    if st.button("🚀 Try the sample team", type="primary", use_container_width=True):
+        sample_df = apply_identity_map(_build_sample_df(), st.session_state.identity_map)
+        sample_df["date"] = pd.to_datetime(sample_df["date"], utc=True)
+        st.session_state.df = sample_df
+        st.session_state.repo = "sample/team-project"
+        st.session_state.analysis_done = True
+        st.session_state.is_sample = True
+        st.session_state.ai_summaries = {}
+        st.session_state.last_refresh = time.time()
+        st.rerun()
+
+    st.caption("Or fill the URL box with an example repository:")
+    ex1, ex2, ex3 = st.columns(3)
+    ex1.button(
+        "pallets/click",
+        on_click=_set_example_url,
+        args=("pallets/click",),
+        use_container_width=True,
+    )
+    ex2.button(
+        "octocat/Hello-World",
+        on_click=_set_example_url,
+        args=("octocat/Hello-World",),
+        use_container_width=True,
+    )
+    ex3.button(
+        "Shafiya05/fairshare",
+        on_click=_set_example_url,
+        args=("Shafiya05/fairshare",),
+        use_container_width=True,
+    )
+
+    st.markdown(
+        '<p class="fs-home-note">Counts commits, pull requests, issues and comments. '
+        'Ignores bots and merge commits. Raw numbers beside every chart.</p>',
         unsafe_allow_html=True,
     )
